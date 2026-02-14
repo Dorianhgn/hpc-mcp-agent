@@ -31,9 +31,9 @@ RUN mkdir -p /etc/containers && \
     echo 'runroot = "/run/containers/storage"' >> /etc/containers/storage.conf && \
     echo 'graphroot = "/var/lib/containers/storage"' >> /etc/containers/storage.conf
 
-# Install Python packages
+# Install Python packages avec upstash-redis
 RUN pip3 install --no-cache-dir \
-    redis \
+    upstash-redis \
     requests \
     mcp \
     fastmcp
@@ -43,10 +43,6 @@ WORKDIR /workspace
 
 # Copy worker script
 COPY mcp_hpc_worker.py /app/mcp_hpc_worker.py
-
-# Healthcheck (optionnel)
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python3 -c "import redis, os; redis.Redis.from_url(os.getenv('REDIS_URL')).ping()" || exit 1
 
 # Default command
 CMD ["python3", "/app/mcp_hpc_worker.py", "worker-1"]

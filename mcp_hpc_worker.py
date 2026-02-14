@@ -4,31 +4,28 @@ import json
 import time
 import subprocess
 import asyncio
-from redis import Redis
+from upstash_redis import Redis
 from datetime import datetime
 
 class HPCWorker:
     def __init__(self, worker_id="worker-1"):
         self.worker_id = worker_id
-        self.redis = Redis.from_url(
-            os.getenv("REDIS_URL"),
-            decode_responses=True
-        )
+        self.redis = Redis.from_env()
         self.queue_name = "hpc:jobs"
         self.results_prefix = "hpc:result:"
         
         print(f"🚀 Worker {worker_id} started")
-        print(f"📡 Redis: {os.getenv('REDIS_URL')[:40]}...")
+        print(f"📡 Connected to Upstash Redis")
     
     async def run(self):
         """Boucle principale"""
         while True:
             try:
-                # Poll avec timeout de 30s
-                job_data = self.redis.brpop(self.queue_name, timeout=30)
+                # Poll avec timeout de 5s (upstash_redis ne supporte pas BRPOP avec timeout)
+                # Donc on fait du polling classique
+                job_json = self.redis.rpop(self.queue_name)
                 
-                if job_data:
-                    _, job_json = job_data
+                if job_json:
                     job = json.loads(job_json)
                     
                     print(f"\n📥 Job {job['id'][:8]}: {job['type']}")
@@ -36,15 +33,17 @@ class HPCWorker:
                     # Exécute
                     result = await self.execute_job(job)
                     
-                    # Stocke résultat (expire après 1h)
+                    # Stocke résultat (expire après 1h = 3600s)
                     result_key = f"{self.results_prefix}{job['id']}"
-                    self.redis.setex(result_key, 3600, json.dumps(result))
+                    self.redis.set(result_key, json.dumps(result), ex=3600)
                     
                     status = "✅" if result['status'] == 'success' else "❌"
                     print(f"{status} Job {job['id'][:8]} done ({result.get('duration', 0)}s)")
                 
                 else:
+                    # Aucun job, on attend un peu
                     print("💤 Idle...", end='\r')
+                    await asyncio.sleep(5)
             
             except Exception as e:
                 print(f"❌ Error: {e}")
@@ -124,7 +123,6 @@ echo "✅ Build complete: {tag}"
         command = job['command']
         gpus = job.get('gpus', 1)
         
-        # Prépare les flags GPU
         gpu_flags = f"--device nvidia.com/gpu=all" if gpus > 0 else ""
         
         script = f"""#!/bin/bash
@@ -133,7 +131,6 @@ set -e
 echo "Running in container: {image_tag}"
 echo "Command: {command}"
 
-# Run avec Podman
 podman run --rm {gpu_flags} {image_tag} {command}
 """
         
@@ -147,7 +144,6 @@ podman run --rm {gpu_flags} {image_tag} {command}
         mem = job.get('mem', '64G')
         gpus = job.get('gpus', 1)
         
-        # Wrap le script user dans un srun
         wrapped = f"""#!/bin/bash
 srun -p {partition} -c {cpus} --mem={mem} --gres=gpu:{gpus} \\
      --time=0-4:00:00 \\

@@ -4,17 +4,14 @@ import json
 import uuid
 import time
 import asyncio
-from redis import Redis
+from upstash_redis import Redis
 from mcp.server.fastmcp import FastMCP
 
 # Init FastMCP
 mcp = FastMCP("HPC-Orchestrator")
 
-# Redis client
-redis_client = Redis.from_url(
-    os.getenv("REDIS_URL"),
-    decode_responses=True
-)
+# Redis client avec upstash_redis (REST API)
+redis_client = Redis.from_env()
 
 QUEUE_NAME = "hpc:jobs"
 RESULTS_PREFIX = "hpc:result:"
@@ -35,11 +32,13 @@ def submit_job(job_type: str, **params) -> str:
     redis_client.lpush(QUEUE_NAME, json.dumps(job))
     print(f"📤 Job {job_id[:8]} submitted (type: {job_type})")
     
-    # Attend le résultat (avec timeout adaptatif selon le type)
+    # Attend le résultat (avec timeout adaptatif)
     timeout = {
-        "podman_build": 600,      # 10 min pour un build
-        "podman_run": 3600,       # 1h pour un benchmark
-        "huggingface_check": 30,  # 30s pour une API call
+        "podman_build": 600,      # 10 min
+        "podman_run": 3600,       # 1h
+        "huggingface_check": 30,  # 30s
+        "gpu_info": 60,           # 1 min
+        "slurm_queue": 30,        # 30s
     }.get(job_type, 300)
     
     result = wait_for_result(job_id, timeout)
@@ -60,9 +59,10 @@ def wait_for_result(job_id: str, timeout: int) -> str:
                 return result.get("output", "")
             else:
                 error = result.get("error", "Unknown error")
-                return f"❌ Job failed:\n{error}\n\nStderr:\n{result.get('stderr', '')}"
+                stderr = result.get("stderr", "")
+                return f"❌ Job failed:\n{error}\n\nStderr:\n{stderr}"
         
-        # Feedback de progression toutes les 10s
+        # Feedback toutes les 10s
         if i % 10 == 0 and i > 0:
             print(f"⏳ Still waiting for job {job_id[:8]}... ({i}s elapsed)")
         
