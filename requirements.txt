@@ -1,0 +1,4 @@
+upstash-redis
+requests 
+mcp 
+fastmcp

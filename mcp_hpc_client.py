@@ -11,7 +11,13 @@ from mcp.server.fastmcp import FastMCP
 mcp = FastMCP("HPC-Orchestrator")
 
 # Redis client avec upstash_redis (REST API)
-redis_client = Redis.from_env()
+_redis_client = None
+
+def get_redis():
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = Redis.from_env()
+    return _redis_client
 
 QUEUE_NAME = "hpc:jobs"
 RESULTS_PREFIX = "hpc:result:"
@@ -29,7 +35,7 @@ def submit_job(job_type: str, **params) -> str:
     }
     
     # Envoie dans la queue
-    redis_client.lpush(QUEUE_NAME, json.dumps(job))
+    get_redis().lpush(QUEUE_NAME, json.dumps(job))
     print(f"📤 Job {job_id[:8]} submitted (type: {job_type})")
     
     # Attend le résultat (avec timeout adaptatif)
@@ -50,7 +56,7 @@ def wait_for_result(job_id: str, timeout: int) -> str:
     result_key = f"{RESULTS_PREFIX}{job_id}"
     
     for i in range(timeout):
-        result_json = redis_client.get(result_key)
+        result_json = get_redis().get(result_key)
         
         if result_json:
             result = json.loads(result_json)
@@ -72,6 +78,25 @@ def wait_for_result(job_id: str, timeout: int) -> str:
 
 
 # ==================== TOOLS ====================
+
+@mcp.tool()
+def echo_env() -> str:
+    """Debug: vérifie les variables d'environnement et la connexion Redis."""
+    url = os.getenv("UPSTASH_REDIS_REST_URL", "NOT SET")
+    token = os.getenv("UPSTASH_REDIS_REST_TOKEN", "NOT SET")
+    
+    result = f"UPSTASH_REDIS_REST_URL: {url}\n"
+    result += f"UPSTASH_REDIS_REST_TOKEN: {token[:20]}...\n" if token != "NOT SET" else "UPSTASH_REDIS_REST_TOKEN: NOT SET\n"
+    
+    try:
+        r = get_redis()
+        r.set("ping_test", "ok", ex=10)
+        val = r.get("ping_test")
+        result += f"Redis connection: ✅ OK (ping={val})\n"
+    except Exception as e:
+        result += f"Redis connection: ❌ {e}\n"
+    
+    return result
 
 @mcp.tool()
 def build_and_test_image(repo_url: str, dockerfile_content: str, tag: str) -> str:
