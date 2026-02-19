@@ -118,8 +118,15 @@ echo "✅ Build complete: {tag}"
 set -e
 echo "Running in container: {image_tag}"
 echo "Command: {command}"
+
 ctr=$(buildah from {image_tag})
-buildah run --isolation chroot {gpu_mounts} $ctr -- {command}
+
+# Execute /bin/bash inside the container and feed it the command via standard input.
+# This bypasses the $PATH issue and safely handles any messy quotes in the command string.
+buildah run --isolation chroot {gpu_mounts} $ctr -- /bin/bash << 'EOF_CMD'
+{command}
+EOF_CMD
+
 buildah rm $ctr
 """
         return self._run_bash(script)
@@ -149,33 +156,48 @@ buildah rm $ctr
 
     def _detect_gpu_mounts(self) -> str:
         """
-        Auto-detect GPU device nodes and host driver libs at runtime.
-        Returns a string of buildah -v flags ready to inject into buildah run.
-        This is called per-job so it stays correct after driver upgrades.
+        Auto-detect GPU device nodes and host driver libs by parsing Pyxis mounts.
         """
+        import glob
+        import os
+        
         mounts = []
 
         # 1. Mount the entire /dev so all nvidia device nodes are accessible
         mounts.append("-v /dev:/dev")
 
-        # 2. Detect versioned libcuda.so and libnvidia-ml.so from host ldconfig
-        #    The container has its own CUDA stack but needs the host's driver-side .so
-        ldconfig = subprocess.run(
-            ["bash", "-c", "ldconfig -p | grep -E 'libcuda\\.so|libnvidia-ml\\.so|libnvidia-ptxjitcompiler\\.so|libnvidia-nvvm\\.so' | awk '{print $NF}' | sort -u"],
-            capture_output=True, text=True
+        # 2. Parse /proc/mounts to find exactly what Slurm/Pyxis injected
+        try:
+            with open("/proc/mounts", "r") as f:
+                for line in f:
+                    # Look for nvidia binaries or libraries injected by the HPC
+                    if "nvidia" in line.lower() and ("/usr/bin/" in line or "/usr/lib/" in line):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            mount_point = parts[1]
+                            if os.path.exists(mount_point) and not os.path.isdir(mount_point):
+                                mounts.append(f"-v {mount_point}:{mount_point}")
+        except Exception as e:
+            print(f"Warning: Could not parse /proc/mounts: {e}")
+
+        # 3. Explicitly grab essential symlinks (Pyxis sometimes mounts the raw versioned file, 
+        # but PyTorch/nvidia-smi look for the .so.1 or .so symlinks)
+        extra_libs = (
+            glob.glob("/usr/lib/x86_64-linux-gnu/libcuda.so*") + 
+            glob.glob("/usr/lib/x86_64-linux-gnu/libnvidia-ml.so*")
         )
-        for lib in ldconfig.stdout.strip().splitlines():
-            lib = lib.strip()
-            if lib and os.path.exists(lib):
+        for lib in extra_libs:
+            if os.path.exists(lib):
                 mounts.append(f"-v {lib}:{lib}")
 
-        # 3. Mount nvidia-smi binary if available
-        which = subprocess.run(["which", "nvidia-smi"], capture_output=True, text=True)
-        if which.returncode == 0:
-            smi = which.stdout.strip()
-            mounts.append(f"-v {smi}:{smi}")
+        # 4. Ensure the nvidia-smi binary is included
+        smi_path = "/usr/bin/nvidia-smi"
+        if os.path.exists(smi_path):
+            mounts.append(f"-v {smi_path}:{smi_path}")
 
-        return " ".join(mounts)
+        # Remove duplicates and return as a single string
+        unique_mounts = list(dict.fromkeys(mounts))
+        return " ".join(unique_mounts)
 
     def _run_bash(self, script: str):
         """Exécute un script bash de façon synchrone"""
